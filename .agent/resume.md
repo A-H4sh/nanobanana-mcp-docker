@@ -24,6 +24,10 @@ request_audio_upload flow.
    metadata shows used_input_images=true; a local path yields the guided error.
 3. Existing behaviour preserved: tools/list still lists the 4 upstream tools;
    generation without references still returns download_url/safe_filename.
+   AMENDED 2026-09-25 17:10 after review: upload_file is deliberately hidden
+   on Lambda (it could never work there: upstream refuses absolute paths and
+   /var/task is read-only), so tools/list = generate_image, maintenance,
+   show_output_stats, request_image_upload. Recorded, not silently dropped.
 
 # Done
 - Root cause: upstream reads input_image_path_* / upload_file.path from the
@@ -51,7 +55,17 @@ request_audio_upload flow.
   sniff handles 64-bit/0 ftyp sizes and AVIF brands beyond 64 bytes.
 - [done] tests: 89 passed with --network none (logs/tests-4.log), incl. real
   upstream generate_image against a fake Gemini (GEMINI_BASE_URL)
-- [done] mutation check of the revised suite: 11/11 mutants killed
+- [PARTIAL] mutation check: 9/11 valid kills. `no-fail-closed` and
+  `no-upload-ext-check` are INVALID (their builds failed with
+  DeadlineExceeded as dockerd hung; the stale previous image ran). Re-run
+  with a build-status check once dockerd is back (reviewer's harness:
+  scratchpad/rereview/run_all.sh + mutants.py).
+- [done in code, untested] round-2 fixes: regional virtual-host SigV4
+  (addressing_style virtual; path for custom endpoints), SigV4/TTL pinned
+  in tests, sweep of stale staged files (>1800 s), staged paths replaced in
+  error text too, read/mkdir/rename errors -> ToolError, output_path ""
+  = absent, generate_image description patched, README/docstring token
+  length. Needs: run-tests.sh + mutants once dockerd answers.
 - [running] adversarial-critic re-review (round 2) of the uncommitted diff
 - [blocked 17:06 JST] host dockerd stopped answering (/_ping times out;
   other projects' `docker ps` hang too). `sam build` failed on it. Did NOT
@@ -67,14 +81,15 @@ request_audio_upload flow.
   presigned POST size limit at upload time.
 
 # Waiting
-User action: the host Docker engine has been hung since ~17:06 JST
-(`curl --unix-socket /var/run/docker.sock http://localhost/_ping` times
-out; /var/run/docker.sock is Docker Desktop's WSL proxy, created 13:20).
-Needs a Docker Desktop restart (Windows tray -> Restart) or
-`sudo systemctl restart docker` — either stops other projects' running
-containers, and sudo needs a password, so the agent did not do it.
-After it answers again: `cd infra && DOCKER_CONFIG=~/.docker-sam sam build
-&& DOCKER_CONFIG=~/.docker-sam sam deploy`, then run the live E2E.
+User action: restart the host Docker engine. Since ~17:06 JST the native
+dockerd (pid 790, `docker.service`, socket /var/run/docker.sock via
+docker.socket fd://) first timed out on /_ping, and since ~17:31 refuses
+connections outright; process still alive, 10 min of polling did not
+recover it. Fix: `sudo systemctl restart docker` (needs the user's
+password; stops other projects' running containers, e.g. a 2h pso.py run).
+After it answers: (1) ./lambda/run-tests.sh (round-2 fixes are UNCOMMITTED
+and untested), (2) valid re-run of the 2 invalid mutants with a build-status
+check, (3) commit+push, (4) sam build && sam deploy, (5) live E2E.
 
 # Risks
 - Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
