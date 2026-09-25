@@ -1,64 +1,79 @@
 # Current task
-Add S3 upload + presigned download URL to Lambda variant so generated
-images survive the per-instance /tmp limitation, and inject MCP
-instructions so the LLM auto-downloads them.
+Let the Lambda-hosted nanobanana MCP accept reference images from the
+client machine (input_image_path_* / upload_file.path) — keep Lambda.
 
 # Goal
-Users can use nanobanana-mcp as a remote MCP server hosted on AWS Lambda, with no
-per-machine Docker/stdio setup. Claude Code connects via `"type": "http"` + URL +
-bearer token. Existing Docker/stdio setup is preserved.
+Client flow: `request_image_upload(filename)` -> presigned PUT URL + s3_key
+-> `curl -X PUT --upload-file` -> `generate_image(input_image_path_1=<s3_key>)`.
+Generated images also expose their own `s3_key` so they can be fed back as
+references without re-uploading. Mirrors ~/whisper-mcp-docker's
+request_audio_upload flow.
+
+# Pass criteria (written BEFORE implementation, 2026-09-25 15:40 JST)
+1. Unit/integration tests (fastmcp 3.2.4 in-process client + moto S3) pass:
+   - s3_key args are staged to /tmp and the tool sees a readable local file
+     with the correct suffix (png/jpeg/webp/heic) and bytes identical to S3
+   - local client paths (/home/..., /proc/self/environ, relative) are
+     rejected with an error that names request_image_upload; the tool never runs
+   - oversize objects, non-images, missing keys, malformed keys -> error
+   - staged files are deleted after the call (success AND failure)
+   - request_image_upload returns a PUT URL for `uploads/<32hex>/<safe>`
+   - generated-image augment adds `s3_key`, and that key is accepted as input
+2. Live deploy: a real reference PNG uploaded via curl to the presigned URL
+   is used by generate_image on the deployed Lambda and yields an image whose
+   metadata shows used_input_images=true; a local path yields the guided error.
+3. Existing behaviour preserved: tools/list still lists the 4 upstream tools;
+   generation without references still returns download_url/safe_filename.
 
 # Done
-- Investigated upstream nanobanana-mcp-server: FASTMCP_TRANSPORT=http supported.
-- Confirmed FastMCP 3.2 http_app(stateless_http=True, json_response=True) works for
-  Lambda (no SSE streaming needed; single JSON request/response).
-- Confirmed images come back as inline MCP content blocks (no S3 needed).
-- lambda/app.py (Mangum + Starlette bearer-auth middleware, hmac.compare_digest).
-- lambda/Dockerfile (public.ecr.aws/lambda/python:3.12 base).
-- infra/template.yaml (SAM: container function + Function URL NONE-auth + CORS *).
-- lambda/README.md with deploy + client-config + WSL2 DOCKER_CONFIG note.
-- Verified locally via Lambda RIE: tools/list = 200, bad-auth = 401.
-- Created IAM user `nanobanana-deployer` with AdministratorAccess, switched from
-  root keys to IAM user keys.
-- Worked around WSL2 Docker Desktop credsStore issue by pointing
-  DOCKER_CONFIG=~/.docker-sam (empty config) for SAM builds/deploys.
-- `sam build` + `sam deploy --guided` succeeded on ap-northeast-1.
-- Live Function URL returns full tools/list over HTTPS with bearer auth.
+- Root cause: upstream reads input_image_path_* / upload_file.path from the
+  server FS; Lambda cannot see the client FS.
+- Deployed image versions captured in logs/deployed-freeze.txt
+  (fastmcp 3.2.4, mcp 1.27.0, nanobanana-mcp-server 0.4.4). Unpinned rebuild
+  would jump to fastmcp 4.0.9 / mcp 2.2.0 -> pin via constraints file.
+- Found: python:3.12 Lambda image has no .webp mimetype -> upstream sends
+  webp input as image/png. Register it.
+- Branch feat/lambda-reference-image-upload stacked on PR #2
+  (feat/aws-lambda-deployment).
 
 # Next
-- User pastes FunctionUrl + bearer token into their `.mcp.json` under
-  `{"type":"http","url":".../mcp","headers":{"Authorization":"Bearer ..."}}`.
-- Optional: revoke root access keys in AWS console (local backup already
-  cleaned up per instructions).
-- Optional: open PR from feat/aws-lambda-deployment into main once user confirms
-  Claude Code successfully consumes the remote server.
-- Optional cost guardrail: add ReservedConcurrentExecutions or a CloudWatch
-  billing alarm if the user wants hard spend caps.
+- [done] v1 impl + 56 tests; reproduced bug on OLD deploy
+- [done] reviews (adversarial-critic + security-auditor). Fixed:
+  upload_file broken vs real upstream (abs path refused, cwd read-only) ->
+  hidden + refused on Lambda; output_path refused; curl now
+  `curl -g -fsS -X PUT --upload-file '<LOCAL_PATH>' '<upload_url>'`;
+  upload URLs only for image extensions, TTL 900 s; combined cap
+  MAX_REFERENCE_MB=13 (Gemini 20 MB inline after base64); streamed staging
+  with partial-file cleanup; /tmp paths in results replaced by s3_keys;
+  AccessDenied msg; SigV4 presign; auth bytes compare (401 not 500);
+  fail closed on Lambda without token; McpAuthToken MinLength 32 (current
+  client token is 64 hex -> OK); _safe_basename fullmatch + short suffix;
+  sniff handles 64-bit/0 ftyp sizes and AVIF brands beyond 64 bytes.
+- [done] tests: 89 passed with --network none (logs/tests-4.log), incl. real
+  upstream generate_image against a fake Gemini (GEMINI_BASE_URL)
+- [done] mutation check of the revised suite: 11/11 mutants killed
+- [running] adversarial-critic re-review (round 2) of the uncommitted diff
+- [blocked 17:06 JST] host dockerd stopped answering (/_ping times out;
+  other projects' `docker ps` hang too). `sam build` failed on it. Did NOT
+  restart dockerd: it would kill other projects' running containers
+  (e.g. a 2h pso.py run) -> user decision if it doesn't recover.
+- then: commit, push, PR (base feat/aws-lambda-deployment)
+- then: sam build + deploy, live E2E (scratchpad e2e.py; e2e `gen` must be
+  updated: model_tier nb2 / resolution 1k; `uploadfile` step now expected to
+  be refused). Verify SigV4 GET+PUT URLs work against real S3.
+- Not fixed on purpose (user decisions): dependency bumps for known advisories
+  in the pinned versions (mcp 1.27->1.28.1, starlette 1.0->1.3.1+, pillow
+  12.2->12.3; all judged unreachable here); ReservedConcurrentExecutions;
+  presigned POST size limit at upload time.
 
 # Waiting
-Awaiting user-initiated rotation of two secrets that leaked into the
-session transcript when the agent ran
-`aws lambda get-function-configuration --query Environment.Variables`
-without filtering. Specifically:
-- GEMINI_API_KEY (Google AI Studio): revoke + reissue
-- MCP_AUTH_TOKEN (CFN Parameter): regenerate via `openssl rand -hex 32`
-  and redeploy with `--parameter-overrides McpAuthToken=<new>`,
-  then update the .mcp.json bearer.
+none (secret rotation below is the user's call, not blocking this task)
 
 # Risks
-- Bearer token is the only auth in front of the Function URL. If the token
-  leaks, anyone can invoke the Lambda and burn Gemini API quota. Rotate by
-  redeploying with a new McpAuthToken value.
-- Root access keys should be disabled in the AWS console (manual step, CLI
-  cannot touch own root keys).
-- Lambda cold start for container images is ~2-5s; Gemini Pro 4K gen can
-  approach 90s. Timeout set to 180s in template.yaml — raise if users see
-  timeouts.
+- Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
+  leaked into an old transcript) is still the user's call; this task does not
+  touch secrets. Redeploy reuses samconfig parameter values.
 
 # Resume instruction
-Implementation and deployment are complete. If the user comes back for
-changes: edit lambda/app.py or infra/template.yaml, then from the infra/
-directory run `DOCKER_CONFIG=~/.docker-sam sam build && DOCKER_CONFIG=~/.docker-sam sam deploy`.
-samconfig.toml (gitignored) already has stack name / region / parameters so
-subsequent deploys don't need --guided. For teardown run
-`DOCKER_CONFIG=~/.docker-sam sam delete` from infra/.
+Continue from `# Next`. Build/test only inside Docker. Deploy with
+`cd infra && DOCKER_CONFIG=~/.docker-sam sam build && DOCKER_CONFIG=~/.docker-sam sam deploy`.

@@ -12,6 +12,7 @@ Parameters:
   McpAuthToken:
     Type: String
     NoEcho: true
+    MinLength: 32
     Description: >
       Shared bearer token. Clients must send `Authorization: Bearer <this>`.
       Generate with e.g. `openssl rand -hex 32`.
@@ -43,7 +44,9 @@ Parameters:
     Default: 7
     MinValue: 1
     MaxValue: 365
-    Description: Days before generated images are auto-deleted from S3 (lifecycle).
+    Description: >
+      Days before generated images (images/) and uploaded reference images
+      (uploads/) are auto-deleted from S3 (lifecycle).
 
 Resources:
   ImageBucket:
@@ -61,6 +64,10 @@ Resources:
           - Id: ExpireGeneratedImages
             Status: Enabled
             Prefix: images/
+            ExpirationInDays: !Ref ImageRetentionDays
+          - Id: ExpireUploadedReferences
+            Status: Enabled
+            Prefix: uploads/
             ExpirationInDays: !Ref ImageRetentionDays
           - Id: AbortIncompleteMultipartUploads
             Status: Enabled
@@ -117,7 +124,11 @@ Resources:
               Action:
                 - s3:PutObject
                 - s3:GetObject
-              Resource: !Sub "${ImageBucket.Arn}/images/*"
+              # PutObject on uploads/ is what the presigned PUT URLs from
+              # request_image_upload are signed with.
+              Resource:
+                - !Sub "${ImageBucket.Arn}/images/*"
+                - !Sub "${ImageBucket.Arn}/uploads/*"
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: BUFFERED
@@ -138,5 +149,7 @@ Outputs:
   FunctionName:
     Value: !Ref NanoBananaMcpFunction
   ImageBucketName:
-    Description: S3 bucket where generated images are uploaded for client download.
+    Description: >
+      S3 bucket holding generated images (images/) and client-uploaded
+      reference images (uploads/).
     Value: !Ref ImageBucket
