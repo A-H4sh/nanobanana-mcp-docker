@@ -57,7 +57,7 @@ request_audio_upload flow.
   other projects' `docker ps` hang too). `sam build` failed on it. Did NOT
   restart dockerd: it would kill other projects' running containers
   (e.g. a 2h pso.py run) -> user decision if it doesn't recover.
-- then: commit, push, PR (base feat/aws-lambda-deployment)
+- [done] commit 93338bc, pushed, PR #3 (base feat/aws-lambda-deployment)
 - then: sam build + deploy, live E2E (scratchpad e2e.py; e2e `gen` must be
   updated: model_tier nb2 / resolution 1k; `uploadfile` step now expected to
   be refused). Verify SigV4 GET+PUT URLs work against real S3.
@@ -67,7 +67,14 @@ request_audio_upload flow.
   presigned POST size limit at upload time.
 
 # Waiting
-none (secret rotation below is the user's call, not blocking this task)
+User action: the host Docker engine has been hung since ~17:06 JST
+(`curl --unix-socket /var/run/docker.sock http://localhost/_ping` times
+out; /var/run/docker.sock is Docker Desktop's WSL proxy, created 13:20).
+Needs a Docker Desktop restart (Windows tray -> Restart) or
+`sudo systemctl restart docker` — either stops other projects' running
+containers, and sudo needs a password, so the agent did not do it.
+After it answers again: `cd infra && DOCKER_CONFIG=~/.docker-sam sam build
+&& DOCKER_CONFIG=~/.docker-sam sam deploy`, then run the live E2E.
 
 # Risks
 - Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
