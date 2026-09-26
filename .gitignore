@@ -1,6 +1,7 @@
 logs/
 infra/samconfig.toml
 infra/.aws-sam/
+.aws-sam/
 __pycache__/
 *.pyc
 .env
