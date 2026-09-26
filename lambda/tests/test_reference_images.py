@@ -16,8 +16,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from botocore.stub import Stubber
@@ -86,6 +88,7 @@ def _staged_files() -> set[Path]:
         (_ftyp(b"mif1", tuple([b"mif1"] * 12) + (b"avif",)), None),  # 13th brand
         (_ftyp(b"mif1", (b"mif1", b"avif"), size_field=0), None),  # size 0 = to EOF
         (_ftyp(b"heic", (b"mif1",), size_field=4096), None),  # box beyond the head
+        (_ftyp(b"heic", tuple([b"mif1"] * 14) + (b"heic",)), ".heic"),  # 76-byte box
         (_img("GIF"), None),
         (b"#!/bin/sh\necho hi\n", None),
         (b"", None),
@@ -156,7 +159,7 @@ def _fake_server():
         }
         calls.append(got)
         if explode:
-            raise RuntimeError("tool failed after staging")
+            raise RuntimeError(f"Failed to load input image {input_image_path_1}: boom")
         return got
 
     @srv.tool()
@@ -273,7 +276,7 @@ def test_a_bad_later_argument_rejects_before_anything_is_downloaded(s3):
     assert calls == [] and _staged_files() == before
 
 
-@pytest.mark.parametrize("value", ["/tmp/nanobanana-inputs", "out.png", "/tmp/nanobanana/README.md", ""])
+@pytest.mark.parametrize("value", ["/tmp/nanobanana-inputs", "out.png", "/tmp/nanobanana/README.md", " "])
 def test_output_path_is_refused(value):
     srv, calls = _fake_server()
     r = _call(srv, "generate_image", {"prompt": "p", "output_path": value})
@@ -295,10 +298,11 @@ def test_tools_without_path_args_are_untouched():
     assert not r.is_error and calls == ["/anything"]
 
 
-def test_no_reference_args_passes_through():
+@pytest.mark.parametrize("output_path", [None, ""])
+def test_no_reference_args_passes_through(output_path):
     srv, calls = _fake_server()
     r = _call(srv, "generate_image", {"prompt": "p", "input_image_path_1": None,
-                                      "input_image_path_2": "", "output_path": None})
+                                      "input_image_path_2": "", "output_path": output_path})
     assert not r.is_error and calls == [{}]
 
 
@@ -347,11 +351,33 @@ def test_limit_is_on_the_combined_size_of_all_references(s3):
 def test_staged_files_are_removed_when_the_tool_itself_fails(s3):
     srv, calls = _fake_server()
     before = _staged_files()
+    key = _put(s3, PNG)
     r = _call(srv, "generate_image", {
-        "prompt": "p", "input_image_path_1": _put(s3, PNG), "explode": True,
+        "prompt": "p", "input_image_path_1": key, "explode": True,
     })
     assert r.is_error and calls[-1]["1"]["is_file"]
     assert _staged_files() == before
+    # the error quotes the caller's key, not the server's /tmp path
+    assert key in r.content[0].text
+    assert str(app.INPUT_STAGING_DIR) not in r.content[0].text
+
+
+def test_stale_staged_files_from_killed_calls_are_swept(s3):
+    app.INPUT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    stale = app.INPUT_STAGING_DIR / "deadbeef.part"
+    fresh = app.INPUT_STAGING_DIR / "cafebabe.png"
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    old = time.time() - app._STALE_STAGING_SECONDS - 60
+    os.utime(stale, (old, old))
+    try:
+        srv, calls = _fake_server()
+        r = _call(srv, "generate_image", {"prompt": "p", "input_image_path_1": _put(s3, PNG)})
+        assert not r.is_error
+        assert not stale.exists() and fresh.exists()
+    finally:
+        stale.unlink(missing_ok=True)
+        fresh.unlink(missing_ok=True)
 
 
 def test_partial_file_is_removed_when_the_disk_write_fails(s3, monkeypatch):
@@ -388,6 +414,19 @@ def test_same_key_can_be_reused_across_calls(s3):
     assert calls[0]["1"]["sha"] == calls[1]["1"]["sha"]
 
 
+def test_real_aws_urls_use_the_regional_virtual_host(monkeypatch):
+    # No custom endpoint = production. Presigning needs no network.
+    monkeypatch.delenv("AWS_ENDPOINT_URL_S3")
+    client = app._make_s3_client()
+    for method in ("put_object", "get_object"):
+        url = client.generate_presigned_url(
+            method, Params={"Bucket": "my-bucket", "Key": "uploads/k/a.png"}, ExpiresIn=60)
+        parts = urlsplit(url)
+        assert parts.scheme == "https"
+        assert parts.netloc == "my-bucket.s3.ap-northeast-1.amazonaws.com", url
+        assert parse_qs(parts.query)["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+
+
 def test_access_denied_reads_as_missing_upload():
     # Production has no s3:ListBucket, so S3 answers a missing key with 403;
     # moto answers 404, hence the stub.
@@ -410,6 +449,9 @@ def test_generated_image_s3_key_is_accepted_as_a_reference():
     images = [{"full_path": str(out)}]
     assert app.S3AugmentMiddleware._augment_images(images)
     key = images[0]["s3_key"]
+    q = parse_qs(urlsplit(images[0]["download_url"]).query)
+    assert q["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert q["X-Amz-Expires"] == [str(app.PRESIGN_TTL)]
     assert key.startswith(app.S3_PREFIX)
     assert app._INPUT_KEY_RE.fullmatch(key)
     staged = []
@@ -475,6 +517,8 @@ def test_tools_list_hides_upload_file_and_rewrites_descriptions(http):
     for arg in ("input_image_path_1", "input_image_path_2", "input_image_path_3"):
         assert "s3_key from request_image_upload" in props[arg]["description"]
     assert "Not supported on this remote server" in props["output_path"]["description"]
+    assert "On this remote server: input_image_path_1/2/3 take an s3_key" in (
+        tools["generate_image"]["description"])
     assert "s3_key" not in props["prompt"]["description"]  # untouched
 
 
@@ -497,7 +541,10 @@ def test_request_image_upload_then_documented_curl_then_reference(http, s3, tmp_
     key = out["s3_key"]
     assert re.fullmatch(r"uploads/[0-9a-f]{32}/image-[0-9a-f]{12}\.webp", key), key
     assert app._INPUT_KEY_RE.fullmatch(key)
-    assert out["expires_in_seconds"] == app.UPLOAD_URL_TTL
+    assert out["expires_in_seconds"] == app.UPLOAD_URL_TTL == 900
+    q = parse_qs(urlsplit(out["upload_url"]).query)
+    assert q["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert q["X-Amz-Expires"] == ["900"]
     assert out["max_reference_mb_combined"] == 1
     assert out["how_to_upload"] == app._CURL_UPLOAD
 

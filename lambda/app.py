@@ -40,6 +40,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
@@ -119,6 +120,10 @@ _REFERENCE_ARGS = ("input_image_path_1", "input_image_path_2", "input_image_path
 # useful to a remote caller.
 _HIDDEN_TOOLS = {"upload_file"}
 
+# Older than any call can run (TimeoutSeconds <= 900): leftovers of a call the
+# Lambda runtime killed (timeout / OOM) before `finally` could clean up.
+_STALE_STAGING_SECONDS = 1800
+
 _HEIC_BRANDS = {b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs"}
 _HEIF_BRANDS = {b"mif1", b"msf1", b"heif"}
 _SNIFF_BYTES = 512
@@ -126,12 +131,24 @@ _SNIFF_BYTES = 512
 _s3_client = None
 
 
+def _make_s3_client():
+    """SigV4 on the regional virtual-hosted endpoint
+    (`<bucket>.s3.<region>.amazonaws.com`). botocore's defaults presign
+    against the global endpoint, which S3 answers with a 307 for a freshly
+    created bucket outside us-east-1; a SigV4 signature covers the host, so
+    that redirect cannot be followed. Custom endpoints (moto in the tests)
+    have no per-bucket DNS and are path-addressed."""
+    style = "path" if os.environ.get("AWS_ENDPOINT_URL_S3") else "virtual"
+    return boto3.client(
+        "s3",
+        config=Config(signature_version="s3v4", s3={"addressing_style": style}),
+    )
+
+
 def _s3():
     global _s3_client
     if _s3_client is None:
-        # SigV4 explicitly: botocore otherwise presigns with SigV2 on the
-        # global endpoint, which AWS has been retiring.
-        _s3_client = boto3.client("s3", config=Config(signature_version="s3v4"))
+        _s3_client = _make_s3_client()
     return _s3_client
 
 
@@ -268,6 +285,11 @@ def _stage_s3_image(key: str, budget: int, staged: list[Path]) -> tuple[Path, in
     cleanup covers partial writes too.
     """
     try:
+        INPUT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.exception("cannot create %s", INPUT_STAGING_DIR)
+        raise ToolError(f"Could not stage {key!r} on the server: {_exc_text(exc)}") from exc
+    try:
         resp = _s3().get_object(
             Bucket=S3_BUCKET, Key=key, Range=f"bytes=0-{budget}"
         )
@@ -290,7 +312,6 @@ def _stage_s3_image(key: str, budget: int, staged: list[Path]) -> tuple[Path, in
             f"Could not read {key!r} from S3 ({type(exc).__name__})."
         ) from exc
 
-    INPUT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
     part = INPUT_STAGING_DIR / f"{uuid.uuid4().hex}.part"
     staged.append(part)
     body = resp["Body"]
@@ -306,9 +327,9 @@ def _stage_s3_image(key: str, budget: int, staged: list[Path]) -> tuple[Path, in
                     head += piece[: _SNIFF_BYTES - len(head)]
                 out.write(piece)
                 size += len(piece)
-    except OSError as exc:
+    except (OSError, BotoCoreError) as exc:
         log.exception("staging reference failed: key=%s", key)
-        raise ToolError(f"Could not stage {key!r} on the server: {exc}") from exc
+        raise ToolError(f"Could not stage {key!r} on the server: {_exc_text(exc)}") from exc
     finally:
         body.close()
 
@@ -327,12 +348,41 @@ def _stage_s3_image(key: str, budget: int, staged: list[Path]) -> tuple[Path, in
         )
     local = part.with_suffix(suffix)
     staged.append(local)
-    part.rename(local)
+    try:
+        part.rename(local)
+    except OSError as exc:
+        log.exception("staging reference failed: key=%s", key)
+        raise ToolError(f"Could not stage {key!r} on the server: {_exc_text(exc)}") from exc
     log.info(
         "staged reference image: key=%s bytes=%d format=%s local=%s budget_left=%d",
         key, size, suffix, local, budget - size,
     )
     return local, size
+
+
+def _exc_text(exc: BaseException) -> str:
+    # strerror keeps "No space left on device" but not the server-side paths
+    # that str(OSError) appends.
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    return type(exc).__name__
+
+
+def _sweep_stale_staging() -> None:
+    """Remove staged files a killed call left behind (/tmp can outlive a
+    Lambda timeout or OOM kill; `finally` does not run on those)."""
+    cutoff = time.time() - _STALE_STAGING_SECONDS
+    try:
+        entries = list(INPUT_STAGING_DIR.iterdir())
+    except FileNotFoundError:
+        return
+    for path in entries:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                log.info("swept stale staged reference %s", path)
+        except OSError:
+            log.warning("could not sweep %s", path)
 
 
 def _discard(paths: list[Path]) -> None:
@@ -343,6 +393,18 @@ def _discard(paths: list[Path]) -> None:
             log.warning("failed to remove staged reference %s", path)
 
 
+def _sub_paths(text: str, mapping: dict[str, str]) -> str:
+    for local, key in mapping.items():
+        text = text.replace(local, key)
+    return text
+
+
+def _with_args(context, args: dict):
+    return context.copy(
+        message=context.message.model_copy(update={"arguments": args})
+    )
+
+
 def _replace_paths(result: Any, mapping: dict[str, str]) -> Any:
     """Show the caller its own s3_keys instead of the /tmp paths upstream echoes
     (summary text, `input_image_paths`, `source_path`); a /tmp path would only
@@ -351,9 +413,7 @@ def _replace_paths(result: Any, mapping: dict[str, str]) -> Any:
         return result
 
     def sub(text: str) -> str:
-        for local, key in mapping.items():
-            text = text.replace(local, key)
-        return text
+        return _sub_paths(text, mapping)
 
     content = [
         block.model_copy(update={"text": sub(block.text)})
@@ -385,7 +445,7 @@ class S3InputImageMiddleware(Middleware):
 
     async def on_call_tool(self, context, call_next):
         name = context.message.name
-        args = context.message.arguments or {}
+        args = dict(context.message.arguments or {})
         if name in _HIDDEN_TOOLS:
             log.warning("rejected call to hidden tool %s", name)
             raise ToolError(
@@ -396,6 +456,8 @@ class S3InputImageMiddleware(Middleware):
             )
         if name != "generate_image":
             return await call_next(context)
+        if args.get("output_path") == "":
+            del args["output_path"]  # empty means "not given", as for the input slots
         if args.get("output_path") is not None:
             log.warning("rejected generate_image.output_path=%r", args.get("output_path"))
             raise ToolError(
@@ -407,12 +469,14 @@ class S3InputImageMiddleware(Middleware):
 
         refs = [(arg, args.get(arg)) for arg in _REFERENCE_ARGS if args.get(arg)]
         if not refs:
-            return await call_next(context)  # upstream treats empty as "not given"
+            # upstream treats empty as "not given"
+            return await call_next(_with_args(context, args))
         for arg, value in refs:  # validate all before downloading any
             if not isinstance(value, str) or not _INPUT_KEY_RE.fullmatch(value):
                 log.warning("rejected generate_image.%s: not a server-minted s3_key: %r", arg, value)
                 raise _not_a_key_error(arg, str(value))
 
+        _sweep_stale_staging()
         staged: list[Path] = []
         try:
             new_args = dict(args)
@@ -425,8 +489,14 @@ class S3InputImageMiddleware(Middleware):
                 budget -= size
                 new_args[arg] = str(local)
                 mapping[str(local)] = key
-            message = context.message.model_copy(update={"arguments": new_args})
-            result = await call_next(context.copy(message=message))
+            try:
+                result = await call_next(_with_args(context, new_args))
+            except ToolError as exc:
+                # upstream errors quote the path, e.g. "Failed to load input image <path>"
+                text = _sub_paths(str(exc), mapping)
+                if text != str(exc):
+                    raise ToolError(text) from exc
+                raise
             return _replace_paths(result, mapping)
         finally:
             _discard(staged)
@@ -457,7 +527,15 @@ class S3InputImageMiddleware(Middleware):
                     "Not supported on this remote server (leave unset): images "
                     "are delivered via download_url / safe_filename."
                 )
-            patched.append(tool.model_copy(update={"parameters": params}))
+            # upstream's text says input images are read from the local filesystem
+            description = (tool.description or "").rstrip() + (
+                "\n\nOn this remote server: input_image_path_1/2/3 take an "
+                "s3_key from request_image_upload (local files cannot be read); "
+                "output_path is unsupported."
+            )
+            patched.append(
+                tool.model_copy(update={"parameters": params, "description": description})
+            )
         return patched
 
 
@@ -524,8 +602,9 @@ def _register_upload_tool(server) -> None:
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Reject requests without a matching `Authorization: Bearer <token>` header.
 
-    Disabled (pass-through) when MCP_AUTH_TOKEN is unset so local invocations
-    (e.g. `sam local start-api`) still work.
+    Disabled (pass-through) when MCP_AUTH_TOKEN is unset, which only happens
+    off Lambda (e.g. running the ASGI app directly); on Lambda — including
+    `sam local`, which sets AWS_LAMBDA_FUNCTION_NAME — import fails without it.
     """
 
     def __init__(self, app, expected_token: str | None) -> None:

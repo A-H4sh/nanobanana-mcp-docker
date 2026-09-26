@@ -187,8 +187,11 @@ cd infra
 sam local start-api \
   --parameter-overrides \
     GeminiApiKey=YOUR_KEY \
-    McpAuthToken=local-dev-token
+    McpAuthToken=$(openssl rand -hex 32)
 ```
+
+The token is required (at least 32 characters): the app refuses to start on
+Lambda, `sam local` included, without one.
 
 Then point a client at `http://127.0.0.1:3000/mcp` with the same bearer.
 
