@@ -509,6 +509,20 @@ def test_lambda_refuses_to_start_without_a_token():
     assert "MCP_AUTH_TOKEN must be set" in proc.stderr
 
 
+def test_info_logs_reach_a_preinstalled_root_handler():
+    # Lambda installs a root handler (at WARNING) before importing the handler
+    # module; INFO lines must still come out when LOG_LEVEL=INFO.
+    env = dict(os.environ, LOG_LEVEL="INFO")
+    code = ("import logging, sys; "
+            "logging.basicConfig(level=logging.WARNING, stream=sys.stderr, format='%(message)s'); "
+            "import app; app.log.info('probe-info-line')")
+    proc = subprocess.run([sys.executable, "-c", code], env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "probe-info-line" in proc.stderr
+    assert "config: bucket=test-bucket" in proc.stderr and "auth=bearer" in proc.stderr
+
+
 def test_tools_list_hides_upload_file_and_rewrites_descriptions(http):
     tools = {t["name"]: t for t in _rpc(http, "tools/list").json()["result"]["tools"]}
     assert set(tools) == {"generate_image", "maintenance", "show_output_stats",

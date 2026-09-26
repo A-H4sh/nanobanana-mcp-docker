@@ -66,6 +66,12 @@ from nanobanana_mcp_server.server import create_wrapper_app
 
 log = logging.getLogger(__name__)
 
+# The Lambda runtime installs a root handler before this module is imported,
+# so upstream's setup_logging() (it only runs when the root has no handlers)
+# is skipped and the root stays at WARNING: LOG_LEVEL was silently ignored and
+# no INFO line (ours or upstream's) ever reached CloudWatch.
+logging.getLogger().setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
 if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") and not os.environ.get("MCP_AUTH_TOKEN"):
     # BearerAuthMiddleware passes everything through without a token; on a
     # public Function URL that would hand Gemini quota and upload URLs to anyone.
@@ -817,5 +823,13 @@ def _build_asgi_app():
 
 
 _asgi_app = _build_asgi_app()
+log.info(
+    "config: bucket=%s images_prefix=%s uploads_prefix=%s max_reference_mb=%d "
+    "upload_url_ttl=%ds download_url_ttl=%ds retention_days=%d log_level=%s "
+    "auth=%s",
+    S3_BUCKET, S3_PREFIX, UPLOAD_PREFIX, MAX_REFERENCE_MB, UPLOAD_URL_TTL,
+    PRESIGN_TTL, IMAGE_RETENTION_DAYS, logging.getLevelName(logging.getLogger().level),
+    "bearer" if os.environ.get("MCP_AUTH_TOKEN") else "NONE",
+)
 
 handler = Mangum(_asgi_app, lifespan="on", api_gateway_base_path="/")
