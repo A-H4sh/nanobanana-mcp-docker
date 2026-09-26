@@ -41,55 +41,22 @@ request_audio_upload flow.
   (feat/aws-lambda-deployment).
 
 # Next
-- [done] v1 impl + 56 tests; reproduced bug on OLD deploy
-- [done] reviews (adversarial-critic + security-auditor). Fixed:
-  upload_file broken vs real upstream (abs path refused, cwd read-only) ->
-  hidden + refused on Lambda; output_path refused; curl now
-  `curl -g -fsS -X PUT --upload-file '<LOCAL_PATH>' '<upload_url>'`;
-  upload URLs only for image extensions, TTL 900 s; combined cap
-  MAX_REFERENCE_MB=13 (Gemini 20 MB inline after base64); streamed staging
-  with partial-file cleanup; /tmp paths in results replaced by s3_keys;
-  AccessDenied msg; SigV4 presign; auth bytes compare (401 not 500);
-  fail closed on Lambda without token; McpAuthToken MinLength 32 (current
-  client token is 64 hex -> OK); _safe_basename fullmatch + short suffix;
-  sniff handles 64-bit/0 ftyp sizes and AVIF brands beyond 64 bytes.
-- [done] tests: 89 passed with --network none (logs/tests-4.log), incl. real
-  upstream generate_image against a fake Gemini (GEMINI_BASE_URL)
-- [PARTIAL] mutation check: 9/11 valid kills. `no-fail-closed` and
-  `no-upload-ext-check` are INVALID (their builds failed with
-  DeadlineExceeded as dockerd hung; the stale previous image ran). Re-run
-  with a build-status check once dockerd is back (reviewer's harness:
-  scratchpad/rereview/run_all.sh + mutants.py).
-- [done in code, untested] round-2 fixes: regional virtual-host SigV4
-  (addressing_style virtual; path for custom endpoints), SigV4/TTL pinned
-  in tests, sweep of stale staged files (>1800 s), staged paths replaced in
-  error text too, read/mkdir/rename errors -> ToolError, output_path ""
-  = absent, generate_image description patched, README/docstring token
-  length. Needs: run-tests.sh + mutants once dockerd answers.
-- [running] adversarial-critic re-review (round 2) of the uncommitted diff
-- [blocked 17:06 JST] host dockerd stopped answering (/_ping times out;
-  other projects' `docker ps` hang too). `sam build` failed on it. Did NOT
-  restart dockerd: it would kill other projects' running containers
-  (e.g. a 2h pso.py run) -> user decision if it doesn't recover.
-- [done] commit 93338bc, pushed, PR #3 (base feat/aws-lambda-deployment)
-- then: sam build + deploy, live E2E (scratchpad e2e.py; e2e `gen` must be
-  updated: model_tier nb2 / resolution 1k; `uploadfile` step now expected to
-  be refused). Verify SigV4 GET+PUT URLs work against real S3.
-- Not fixed on purpose (user decisions): dependency bumps for known advisories
-  in the pinned versions (mcp 1.27->1.28.1, starlette 1.0->1.3.1+, pillow
-  12.2->12.3; all judged unreachable here); ReservedConcurrentExecutions;
-  presigned POST size limit at upload time.
+- [done] deployed 2026-09-26 11:43 JST (commit f318661); live E2E passed all
+  pass criteria (details in PR #3 test plan). Criterion 3 amended (upload_file
+  hidden on purpose).
+- Remaining = user decisions only (fleet TODOs filed):
+  - merge PR #3 -> feat/aws-lambda-deployment and PR #2 -> main. The repo is
+    PUBLIC, so the agent must not self-merge (CLAUDE.md: self-merge only for
+    private personal repos).
+  - rotate MCP_AUTH_TOKEN / GEMINI_API_KEY (high)
+  - bump pinned deps with known advisories within majors (normal)
+  - ReservedConcurrentExecutions / billing alarm (low)
+  - upstream stores JPEG bytes as *.png -> S3 Content-Type image/png (low)
+- To pick up the new tool, the user's Claude Code sessions must reconnect
+  the nanobanana MCP server (tools/list + instructions are read at connect).
 
 # Waiting
-User action: restart the host Docker engine. Since ~17:06 JST the native
-dockerd (pid 790, `docker.service`, socket /var/run/docker.sock via
-docker.socket fd://) first timed out on /_ping, and since ~17:31 refuses
-connections outright; process still alive, 10 min of polling did not
-recover it. Fix: `sudo systemctl restart docker` (needs the user's
-password; stops other projects' running containers, e.g. a 2h pso.py run).
-After it answers: (1) ./lambda/run-tests.sh (round-2 fixes are UNCOMMITTED
-and untested), (2) valid re-run of the 2 invalid mutants with a build-status
-check, (3) commit+push, (4) sam build && sam deploy, (5) live E2E.
+none (feature deployed; only the user decisions above remain)
 
 # Risks
 - Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
