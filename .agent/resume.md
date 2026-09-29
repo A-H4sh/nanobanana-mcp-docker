@@ -70,9 +70,10 @@ request_audio_upload flow.
 
 # Waiting
 User decisions (agent work is finished; nothing else to do until one of these):
-1. Merge PR #3 -> feat/aws-lambda-deployment, then PR #2 -> main (repo is PUBLIC; agent must not self-merge).
+(1. DONE 2026-09-29: user asked to merge. #3 -> e09fc17, #2 -> main bb40f7d; main lambda/ infra/ == deployed f318661.)
 2. Rotate MCP_AUTH_TOKEN (agent can do it on request) and GEMINI_API_KEY (user reissues in AI Studio).
-3. Approve/decline bumping pinned deps with known advisories (mcp, starlette, pillow, ...).
+3. Approve/decline bumping pinned deps with known advisories (explained to the user 2026-09-29:
+   pip-audit 09-25 -> 12 pkgs incl. pillow 12.2->12.3, starlette 1.0->1.3.1, mcp 1.27->1.28.1).
 (4. DONE 2026-09-29 19:12 JST: full flow verified through Claude Code's own MCP tools after a session restart.)
 
 # Risks
