@@ -1,0 +1,13 @@
+# Copy to `samconfig.toml` and fill in values, then `sam deploy`.
+# `samconfig.toml` is gitignored.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "nanobanana-mcp"
+region = "ap-northeast-1"
+resolve_image_repos = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+# parameter_overrides lets you avoid --parameter-overrides on the CLI.
+# Replace the values below. Keep this file out of git (samconfig.toml is ignored).
+# parameter_overrides = "GeminiApiKey=... McpAuthToken=... LogLevel=INFO"

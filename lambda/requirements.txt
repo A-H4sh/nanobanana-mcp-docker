@@ -1,0 +1,3 @@
+nanobanana-mcp-server
+mangum>=0.17
+boto3>=1.34

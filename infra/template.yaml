@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  nanobanana MCP server on AWS Lambda (container image + Function URL).
+  Exposes Streamable HTTP MCP at `<FunctionUrl>mcp` protected by a bearer token.
+
+Parameters:
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Description: Google Gemini API key (passed to the upstream server as GEMINI_API_KEY).
+  McpAuthToken:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: >
+      Shared bearer token. Clients must send `Authorization: Bearer <this>`.
+      Generate with e.g. `openssl rand -hex 32`.
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+  MemorySize:
+    Type: Number
+    Default: 2048
+    MinValue: 512
+    MaxValue: 10240
+  TimeoutSeconds:
+    Type: Number
+    Default: 180
+    MinValue: 30
+    MaxValue: 900
+  PresignTtlSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 60
+    MaxValue: 86400
+    Description: >
+      TTL of S3 presigned download URLs returned to clients (default 1h, max 24h).
+      Capped at 24h because presigned URLs bypass IAM revocation; longer TTLs
+      outlive credential rotations.
+  ImageRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 365
+    Description: >
+      Days before generated images (images/) and uploaded reference images
+      (uploads/) are auto-deleted from S3 (lifecycle).
+
+Resources:
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireGeneratedImages
+            Status: Enabled
+            Prefix: images/
+            ExpirationInDays: !Ref ImageRetentionDays
+          - Id: ExpireUploadedReferences
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: !Ref ImageRetentionDays
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            Prefix: ""
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ImageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ImageBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ImageBucket.Arn
+              - !Sub "${ImageBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  NanoBananaMcpFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerTag: latest
+      DockerContext: ../lambda
+      Dockerfile: Dockerfile
+    Properties:
+      PackageType: Image
+      MemorySize: !Ref MemorySize
+      Timeout: !Ref TimeoutSeconds
+      Architectures: [x86_64]
+      Environment:
+        Variables:
+          GEMINI_API_KEY: !Ref GeminiApiKey
+          MCP_AUTH_TOKEN: !Ref McpAuthToken
+          LOG_LEVEL: !Ref LogLevel
+          IMAGE_OUTPUT_DIR: /tmp/nanobanana
+          IMAGE_S3_BUCKET: !Ref ImageBucket
+          IMAGE_S3_PREFIX: images/
+          IMAGE_PRESIGN_TTL_SECONDS: !Sub "${PresignTtlSeconds}"
+          IMAGE_RETENTION_DAYS: !Sub "${ImageRetentionDays}"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              # PutObject on uploads/ is what the presigned PUT URLs from
+              # request_image_upload are signed with.
+              Resource:
+                - !Sub "${ImageBucket.Arn}/images/*"
+                - !Sub "${ImageBucket.Arn}/uploads/*"
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: BUFFERED
+        Cors:
+          AllowOrigins: ["*"]
+          AllowMethods: ["POST", "GET"]
+          AllowHeaders:
+            - authorization
+            - content-type
+            - accept
+            - mcp-session-id
+            - mcp-protocol-version
+
+Outputs:
+  FunctionUrl:
+    Description: Public HTTPS endpoint. Append `mcp` (e.g. `https://xxx.lambda-url.../mcp`).
+    Value: !GetAtt NanoBananaMcpFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref NanoBananaMcpFunction
+  ImageBucketName:
+    Description: >
+      S3 bucket holding generated images (images/) and client-uploaded
+      reference images (uploads/).
+    Value: !Ref ImageBucket

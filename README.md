@@ -1,6 +1,10 @@
 # nanobanana-mcp-docker
 
-Docker image for [Nano Banana MCP server](https://github.com/ConechoAI/Nano-Banana-MCP) with custom entrypoint that injects file output instructions into the MCP protocol.
+Two ways to run [Nano Banana MCP server](https://github.com/ConechoAI/Nano-Banana-MCP):
+
+1. **Local Docker / stdio** (this file) — `docker run` spawned by Claude Code.
+2. **AWS Lambda / HTTP** ([lambda/README.md](lambda/README.md)) — hosted remote
+   MCP, no per-machine setup. Recommended if you move between machines often.
 
 ## What this does
 
