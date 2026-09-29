@@ -72,9 +72,7 @@ request_audio_upload flow.
 User decisions (agent work is finished; nothing else to do until one of these):
 (1. DONE 2026-09-29: user asked to merge. #3 -> e09fc17, #2 -> main bb40f7d; main lambda/ infra/ == deployed f318661.)
 2. Rotate MCP_AUTH_TOKEN (agent can do it on request) and GEMINI_API_KEY (user reissues in AI Studio).
-3. Dep bump: user said go (2026-09-29). Done on chore/bump-lambda-deps = PR #4, deployed
-   21:53 JST and verified live. Deployed code is AHEAD of main until PR #4 is merged —
-   public repo, so merging needs the user's OK.
+(3. DONE 2026-09-29: dep bump PR #4 deployed 21:53 JST, verified live, merged -> main 1c44966.)
 (4. DONE 2026-09-29 19:12 JST: full flow verified through Claude Code's own MCP tools after a session restart.)
 
 # Risks
