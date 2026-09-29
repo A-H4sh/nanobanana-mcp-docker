@@ -1,0 +1,13 @@
+# Test image layered on the exact production image (same pinned runtime
+# deps), plus test-only tools constrained to the same pins.
+# Build/run via lambda/run-tests.sh.
+ARG BASE_IMAGE=nanobanana-lambda:test-base
+FROM ${BASE_IMAGE}
+
+RUN pip install --no-cache-dir -c ${LAMBDA_TASK_ROOT}/constraints.txt \
+        pytest "moto[server]"
+
+COPY tests ${LAMBDA_TASK_ROOT}/tests
+
+ENTRYPOINT ["python", "-m", "pytest", "-p", "no:cacheprovider"]
+CMD ["-v", "tests"]

@@ -1,64 +1,85 @@
 # Current task
-Add S3 upload + presigned download URL to Lambda variant so generated
-images survive the per-instance /tmp limitation, and inject MCP
-instructions so the LLM auto-downloads them.
+Let the Lambda-hosted nanobanana MCP accept reference images from the
+client machine (input_image_path_* / upload_file.path) — keep Lambda.
 
 # Goal
-Users can use nanobanana-mcp as a remote MCP server hosted on AWS Lambda, with no
-per-machine Docker/stdio setup. Claude Code connects via `"type": "http"` + URL +
-bearer token. Existing Docker/stdio setup is preserved.
+Client flow: `request_image_upload(filename)` -> presigned PUT URL + s3_key
+-> `curl -X PUT --upload-file` -> `generate_image(input_image_path_1=<s3_key>)`.
+Generated images also expose their own `s3_key` so they can be fed back as
+references without re-uploading. Mirrors ~/whisper-mcp-docker's
+request_audio_upload flow.
+
+# Pass criteria (written BEFORE implementation, 2026-09-25 15:40 JST)
+1. Unit/integration tests (fastmcp 3.2.4 in-process client + moto S3) pass:
+   - s3_key args are staged to /tmp and the tool sees a readable local file
+     with the correct suffix (png/jpeg/webp/heic) and bytes identical to S3
+   - local client paths (/home/..., /proc/self/environ, relative) are
+     rejected with an error that names request_image_upload; the tool never runs
+   - oversize objects, non-images, missing keys, malformed keys -> error
+   - staged files are deleted after the call (success AND failure)
+   - request_image_upload returns a PUT URL for `uploads/<32hex>/<safe>`
+   - generated-image augment adds `s3_key`, and that key is accepted as input
+2. Live deploy: a real reference PNG uploaded via curl to the presigned URL
+   is used by generate_image on the deployed Lambda and yields an image whose
+   metadata shows used_input_images=true; a local path yields the guided error.
+3. Existing behaviour preserved: tools/list still lists the 4 upstream tools;
+   generation without references still returns download_url/safe_filename.
+   AMENDED 2026-09-25 17:10 after review: upload_file is deliberately hidden
+   on Lambda (it could never work there: upstream refuses absolute paths and
+   /var/task is read-only), so tools/list = generate_image, maintenance,
+   show_output_stats, request_image_upload. Recorded, not silently dropped.
 
 # Done
-- Investigated upstream nanobanana-mcp-server: FASTMCP_TRANSPORT=http supported.
-- Confirmed FastMCP 3.2 http_app(stateless_http=True, json_response=True) works for
-  Lambda (no SSE streaming needed; single JSON request/response).
-- Confirmed images come back as inline MCP content blocks (no S3 needed).
-- lambda/app.py (Mangum + Starlette bearer-auth middleware, hmac.compare_digest).
-- lambda/Dockerfile (public.ecr.aws/lambda/python:3.12 base).
-- infra/template.yaml (SAM: container function + Function URL NONE-auth + CORS *).
-- lambda/README.md with deploy + client-config + WSL2 DOCKER_CONFIG note.
-- Verified locally via Lambda RIE: tools/list = 200, bad-auth = 401.
-- Created IAM user `nanobanana-deployer` with AdministratorAccess, switched from
-  root keys to IAM user keys.
-- Worked around WSL2 Docker Desktop credsStore issue by pointing
-  DOCKER_CONFIG=~/.docker-sam (empty config) for SAM builds/deploys.
-- `sam build` + `sam deploy --guided` succeeded on ap-northeast-1.
-- Live Function URL returns full tools/list over HTTPS with bearer auth.
+- Root cause: upstream reads input_image_path_* / upload_file.path from the
+  server FS; Lambda cannot see the client FS.
+- Deployed image versions captured in logs/deployed-freeze.txt
+  (fastmcp 3.2.4, mcp 1.27.0, nanobanana-mcp-server 0.4.4). Unpinned rebuild
+  would jump to fastmcp 4.0.9 / mcp 2.2.0 -> pin via constraints file.
+- Found: python:3.12 Lambda image has no .webp mimetype -> upstream sends
+  webp input as image/png. Register it.
+- Branch feat/lambda-reference-image-upload stacked on PR #2
+  (feat/aws-lambda-deployment).
 
 # Next
-- User pastes FunctionUrl + bearer token into their `.mcp.json` under
-  `{"type":"http","url":".../mcp","headers":{"Authorization":"Bearer ..."}}`.
-- Optional: revoke root access keys in AWS console (local backup already
-  cleaned up per instructions).
-- Optional: open PR from feat/aws-lambda-deployment into main once user confirms
-  Claude Code successfully consumes the remote server.
-- Optional cost guardrail: add ReservedConcurrentExecutions or a CloudWatch
-  billing alarm if the user wants hard spend caps.
+- [done] deployed 2026-09-26 11:43 JST (commit f318661); live E2E passed all
+  pass criteria (details in PR #3 test plan). Criterion 3 amended (upload_file
+  hidden on purpose).
+- Remaining = user decisions only (fleet TODOs filed):
+  - merge PR #3 -> feat/aws-lambda-deployment and PR #2 -> main. The repo is
+    PUBLIC, so the agent must not self-merge (CLAUDE.md: self-merge only for
+    private personal repos).
+  - rotate MCP_AUTH_TOKEN / GEMINI_API_KEY (high)
+  - bump pinned deps with known advisories within majors (normal)
+  - ReservedConcurrentExecutions / billing alarm (low)
+  - upstream stores JPEG bytes as *.png -> S3 Content-Type image/png (low)
+- To pick up the new tool, the user's Claude Code sessions must reconnect
+  the nanobanana MCP server (tools/list + instructions are read at connect).
+- 2026-09-29 18:30 JST resume check: live server still serves the new
+  tools/list (e2e.py list OK). This long-running session's own tool schema is
+  stale (old list) even after the user's /mcp. A fresh headless
+  `claude -p` (2.1.284) run from inside this session's Bash could not verify
+  the new tools: its new "version negotiation probe" timed out and then
+  CONNECT_TIMEOUT for ALL remote HTTP MCPs at once (nanobanana, whisper,
+  deck-forge, figure-mcp; no Lambda invocation logged), so it is a
+  client/environment issue, not this deploy.
+- 2026-09-29 19:12 JST after the user restarted the session: nanobanana
+  connected in 227 ms, request_image_upload visible, upload_file gone; full
+  flow via MCP tools OK. whisper / deck-forge connected but tools/list timed
+  out in the 2.1.284 client (raw HTTP answers in 0.1 s) -> client-side, not
+  this repo.
 
 # Waiting
-Awaiting user-initiated rotation of two secrets that leaked into the
-session transcript when the agent ran
-`aws lambda get-function-configuration --query Environment.Variables`
-without filtering. Specifically:
-- GEMINI_API_KEY (Google AI Studio): revoke + reissue
-- MCP_AUTH_TOKEN (CFN Parameter): regenerate via `openssl rand -hex 32`
-  and redeploy with `--parameter-overrides McpAuthToken=<new>`,
-  then update the .mcp.json bearer.
+User decisions (agent work is finished; nothing else to do until one of these):
+1. Merge PR #3 -> feat/aws-lambda-deployment, then PR #2 -> main (repo is PUBLIC; agent must not self-merge).
+2. Rotate MCP_AUTH_TOKEN (agent can do it on request) and GEMINI_API_KEY (user reissues in AI Studio).
+3. Approve/decline bumping pinned deps with known advisories (mcp, starlette, pillow, ...).
+(4. DONE 2026-09-29 19:12 JST: full flow verified through Claude Code's own MCP tools after a session restart.)
 
 # Risks
-- Bearer token is the only auth in front of the Function URL. If the token
-  leaks, anyone can invoke the Lambda and burn Gemini API quota. Rotate by
-  redeploying with a new McpAuthToken value.
-- Root access keys should be disabled in the AWS console (manual step, CLI
-  cannot touch own root keys).
-- Lambda cold start for container images is ~2-5s; Gemini Pro 4K gen can
-  approach 90s. Timeout set to 180s in template.yaml — raise if users see
-  timeouts.
+- Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
+  leaked into an old transcript) is still the user's call; this task does not
+  touch secrets. Redeploy reuses samconfig parameter values.
 
 # Resume instruction
-Implementation and deployment are complete. If the user comes back for
-changes: edit lambda/app.py or infra/template.yaml, then from the infra/
-directory run `DOCKER_CONFIG=~/.docker-sam sam build && DOCKER_CONFIG=~/.docker-sam sam deploy`.
-samconfig.toml (gitignored) already has stack name / region / parameters so
-subsequent deploys don't need --guided. For teardown run
-`DOCKER_CONFIG=~/.docker-sam sam delete` from infra/.
+Continue from `# Next`. Build/test only inside Docker. Deploy with
+`cd infra && DOCKER_CONFIG=~/.docker-sam sam build && DOCKER_CONFIG=~/.docker-sam sam deploy`.
