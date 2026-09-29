@@ -61,16 +61,19 @@ request_audio_upload flow.
   the new tools: its new "version negotiation probe" timed out and then
   CONNECT_TIMEOUT for ALL remote HTTP MCPs at once (nanobanana, whisper,
   deck-forge, figure-mcp; no Lambda invocation logged), so it is a
-  client/environment issue, not this deploy. Last PR #3 test-plan item
-  (fresh interactive session picks up request_image_upload) stays open for
-  the user.
+  client/environment issue, not this deploy.
+- 2026-09-29 19:12 JST after the user restarted the session: nanobanana
+  connected in 227 ms, request_image_upload visible, upload_file gone; full
+  flow via MCP tools OK. whisper / deck-forge connected but tools/list timed
+  out in the 2.1.284 client (raw HTTP answers in 0.1 s) -> client-side, not
+  this repo.
 
 # Waiting
 User decisions (agent work is finished; nothing else to do until one of these):
 1. Merge PR #3 -> feat/aws-lambda-deployment, then PR #2 -> main (repo is PUBLIC; agent must not self-merge).
 2. Rotate MCP_AUTH_TOKEN (agent can do it on request) and GEMINI_API_KEY (user reissues in AI Studio).
 3. Approve/decline bumping pinned deps with known advisories (mcp, starlette, pillow, ...).
-4. Last PR #3 test-plan item: in a NEW interactive session, confirm "use this image as a reference" picks up request_image_upload.
+(4. DONE 2026-09-29 19:12 JST: full flow verified through Claude Code's own MCP tools after a session restart.)
 
 # Risks
 - Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
