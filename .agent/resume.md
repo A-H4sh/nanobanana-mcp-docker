@@ -66,7 +66,11 @@ request_audio_upload flow.
   the user.
 
 # Waiting
-none (feature deployed; only the user decisions above remain)
+User decisions (agent work is finished; nothing else to do until one of these):
+1. Merge PR #3 -> feat/aws-lambda-deployment, then PR #2 -> main (repo is PUBLIC; agent must not self-merge).
+2. Rotate MCP_AUTH_TOKEN (agent can do it on request) and GEMINI_API_KEY (user reissues in AI Studio).
+3. Approve/decline bumping pinned deps with known advisories (mcp, starlette, pillow, ...).
+4. Last PR #3 test-plan item: in a NEW interactive session, confirm "use this image as a reference" picks up request_image_upload.
 
 # Risks
 - Previous session's secret-rotation item (GEMINI_API_KEY / MCP_AUTH_TOKEN
