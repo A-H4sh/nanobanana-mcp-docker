@@ -54,6 +54,16 @@ request_audio_upload flow.
   - upstream stores JPEG bytes as *.png -> S3 Content-Type image/png (low)
 - To pick up the new tool, the user's Claude Code sessions must reconnect
   the nanobanana MCP server (tools/list + instructions are read at connect).
+- 2026-09-29 18:30 JST resume check: live server still serves the new
+  tools/list (e2e.py list OK). This long-running session's own tool schema is
+  stale (old list) even after the user's /mcp. A fresh headless
+  `claude -p` (2.1.284) run from inside this session's Bash could not verify
+  the new tools: its new "version negotiation probe" timed out and then
+  CONNECT_TIMEOUT for ALL remote HTTP MCPs at once (nanobanana, whisper,
+  deck-forge, figure-mcp; no Lambda invocation logged), so it is a
+  client/environment issue, not this deploy. Last PR #3 test-plan item
+  (fresh interactive session picks up request_image_upload) stays open for
+  the user.
 
 # Waiting
 none (feature deployed; only the user decisions above remain)
