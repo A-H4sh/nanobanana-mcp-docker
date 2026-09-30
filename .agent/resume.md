@@ -72,6 +72,9 @@ request_audio_upload flow.
 User decisions (agent work is finished; nothing else to do until one of these):
 (1. DONE 2026-09-29: user asked to merge. #3 -> e09fc17, #2 -> main bb40f7d; main lambda/ infra/ == deployed f318661.)
 2. Rotate MCP_AUTH_TOKEN (agent can do it on request) and GEMINI_API_KEY (user reissues in AI Studio).
+5. PR #5 (fleet TODO, low): generated images delivered as their real format (JPEG -> .jpg,
+   image/jpeg). Tested (100 passed, 2/2 mutants), NOT deployed: changes live filenames.
+   On merge: sam build && sam deploy, then check safe_filename .jpg + curl -I Content-Type.
 (3. DONE 2026-09-29: dep bump PR #4 deployed 21:53 JST, verified live, merged -> main 1c44966.)
 (4. DONE 2026-09-29 19:12 JST: full flow verified through Claude Code's own MCP tools after a session restart.)
 
