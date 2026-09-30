@@ -107,6 +107,8 @@ _MIME_BY_SUFFIX = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
 }
 # What request_image_upload issues URLs for: the formats Gemini accepts.
 _UPLOAD_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif")
@@ -201,10 +203,27 @@ def _upload_and_presign(local_path: str) -> tuple[str, str, str] | None:
         )
         return None
 
-    safe_name = _safe_basename(resolved.name, resolved.suffix.lower())
+    # Upstream names Gemini's output `<uuid>.png` even when the bytes are
+    # JPEG (it usually is). Deliver the format the bytes actually have, so
+    # the client's file extension and the S3 Content-Type are both honest.
+    name_suffix = resolved.suffix.lower()
+    try:
+        with open(resolved, "rb") as f:
+            sniffed = _sniff_image_suffix(f.read(_SNIFF_BYTES))
+    except OSError:
+        sniffed = None
+    suffix = sniffed or name_suffix
+    name = resolved.name
+    if sniffed and sniffed != name_suffix and not (
+        sniffed == ".jpg" and name_suffix == ".jpeg"
+    ):
+        name = f"{resolved.stem}{sniffed}"
+    safe_name = _safe_basename(name, suffix)
     key = f"{S3_PREFIX}{uuid.uuid4().hex}-{safe_name}"
-    content_type = _MIME_BY_SUFFIX.get(
-        resolved.suffix.lower(), "application/octet-stream"
+    content_type = _MIME_BY_SUFFIX.get(suffix, "application/octet-stream")
+    log.info(
+        "s3 upload: file=%s name_suffix=%s sniffed=%s content_type=%s safe_filename=%s",
+        resolved.name, name_suffix, sniffed, content_type, safe_name,
     )
     try:
         _s3().upload_file(

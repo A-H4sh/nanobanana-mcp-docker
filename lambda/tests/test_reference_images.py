@@ -462,6 +462,37 @@ def test_generated_image_s3_key_is_accepted_as_a_reference():
         app._discard(staged)
 
 
+@pytest.mark.parametrize(
+    "stem,data,name_suffix,want_suffix,want_type",
+    [
+        ("gen-jpeg", JPEG, ".png", ".jpg", "image/jpeg"),   # upstream's usual case
+        ("gen-png", PNG, ".png", ".png", "image/png"),
+        ("gen-webp", WEBP, ".png", ".webp", "image/webp"),
+        ("gen-jpeg2", JPEG, ".jpeg", ".jpeg", "image/jpeg"),  # already honest: keep
+        ("gen-gif", _img("GIF"), ".gif", ".gif", "image/gif"),  # not sniffed: by name
+        ("x" * 124, HEIC, ".png", ".heic", "image/heic"),  # renamed would be 129 chars
+    ],
+)
+def test_generated_image_is_delivered_as_its_real_format(s3, stem, data, name_suffix,
+                                                         want_suffix, want_type):
+    app.IMAGE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = app.IMAGE_OUTPUT_DIR / f"{stem}{name_suffix}"
+    out.write_bytes(data)
+    try:
+        images = [{"full_path": str(out)}]
+        assert app.S3AugmentMiddleware._augment_images(images)
+        img = images[0]
+        assert img["safe_filename"].endswith(want_suffix), img["safe_filename"]
+        assert app._SAFE_BASENAME_RE.fullmatch(img["safe_filename"])
+        assert img["s3_key"].endswith(img["safe_filename"])
+        assert app._INPUT_KEY_RE.fullmatch(img["s3_key"])
+        head = s3.head_object(Bucket=BUCKET, Key=img["s3_key"])
+        assert head["ContentType"] == want_type
+        assert head["ContentDisposition"] == f'attachment; filename="{img["safe_filename"]}"'
+    finally:
+        out.unlink(missing_ok=True)
+
+
 # --------------------------------------------------------------------------
 # the real server, over the real HTTP stack (auth + S3 augment + upstream)
 
